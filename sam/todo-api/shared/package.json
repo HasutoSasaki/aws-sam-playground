@@ -1,0 +1,14 @@
+{
+  "name": "db-client-layer",
+  "version": "1.0.0",
+  "description": "Shared database client library (DSQL/PostgreSQL)",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-dsql": "^3.0.0",
+    "@aws-sdk/dsql-signer": "^3.0.0",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0"
+  }
+}
