@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  todo-api
+  
+  Todo Management API with Aurora DSQL (with local PostgreSQL support)
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs22.x
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        DSQL_CLUSTER_ENDPOINT: !If [IsProduction, !GetAtt DSQLCluster.VpcEndpointServiceName, ""]
+        IS_LOCAL: !If [IsLocal, "true", "false"]
+        LOCAL_DB_HOST: !If [IsLocal, "localhost", ""]
+        LOCAL_DB_PORT: !If [IsLocal, "5432", ""]
+        LOCAL_DB_NAME: !If [IsLocal, "todoapp", ""]
+        LOCAL_DB_USER: !If [IsLocal, "admin", ""]
+        LOCAL_DB_PASSWORD: !If [IsLocal, "password", ""]
+    LoggingConfig:
+      LogFormat: JSON
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'*'"
+
+Parameters:
+  Environment:
+    Type: String
+    Default: local
+    AllowedValues:
+      - local
+      - dev
+      - prod
+    Description: Deployment environment
+  
+  ClusterName:
+    Type: String
+    Default: todo-app-cluster
+    Description: Name for the Aurora DSQL cluster
+
+Conditions:
+  IsLocal: !Equals [!Ref Environment, local]
+  IsProduction: !Not [!Equals [!Ref Environment, local]]
+Resources:
+  # Aurora DSQL Cluster (only for production)
+  DSQLCluster:
+    Type: AWS::DSQL::Cluster
+    Condition: IsProduction
+    Properties:
+      DeletionProtectionEnabled: false
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterName
+
+  # Shared Layer for DB Client
+  DBClientLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: db-client-layer
+      Description: Shared database client library (DSQL/PostgreSQL)
+      ContentUri: todo-api/shared/
+      CompatibleRuntimes:
+        - nodejs22.x
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: nodejs22.x
+
+  # GET /todos
+  GetTodosFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: todo-api/functions/get-todos/
+      Handler: index.handler
+      Layers:
+        - !Ref DBClientLayer
+      Events:
+        GetTodos:
+          Type: Api
+          Properties:
+            Path: /todos
+            Method: get
+      Policies:
+        - !If
+          - IsProduction
+          - Statement:
+            - Effect: Allow
+              Action:
+                - dsql:DbConnect
+              Resource: !Sub "${DSQLCluster}/*"
+          - !Ref "AWS::NoValue"
+
+  # POST /todos
+  CreateTodoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: todo-api/functions/create-todo/
+      Handler: index.handler
+      Layers:
+        - !Ref DBClientLayer
+      Events:
+        CreateTodo:
+          Type: Api
+          Properties:
+            Path: /todos
+            Method: post
+      Policies:
+        - !If
+          - IsProduction
+          - Statement:
+            - Effect: Allow
+              Action:
+                - dsql:DbConnect
+              Resource: !Sub "${DSQLCluster}/*"
+          - !Ref "AWS::NoValue"
+
+  # PUT /todos/{id}
+  UpdateTodoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: todo-api/functions/update-todo/
+      Handler: index.handler
+      Layers:
+        - !Ref DBClientLayer
+      Events:
+        UpdateTodo:
+          Type: Api
+          Properties:
+            Path: /todos/{id}
+            Method: put
+      Policies:
+        - !If
+          - IsProduction
+          - Statement:
+            - Effect: Allow
+              Action:
+                - dsql:DbConnect
+              Resource: !Sub "${DSQLCluster}/*"
+          - !Ref "AWS::NoValue"
+
+  # DELETE /todos/{id}
+  DeleteTodoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: todo-api/functions/delete-todo/
+      Handler: index.handler
+      Layers:
+        - !Ref DBClientLayer
+      Events:
+        DeleteTodo:
+          Type: Api
+          Properties:
+            Path: /todos/{id}
+            Method: delete
+      Policies:
+        - !If
+          - IsProduction
+          - Statement:
+            - Effect: Allow
+              Action:
+                - dsql:DbConnect
+              Resource: !Sub "${DSQLCluster}/*"
+          - !Ref "AWS::NoValue"
+
+Outputs:
+  TodoApi:
+    Description: "API Gateway endpoint URL for Todo API"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/"
+  
+  DSQLClusterIdentifier:
+    Condition: IsProduction
+    Description: "Aurora DSQL Cluster Identifier"
+    Value: !GetAtt DSQLCluster.Identifier
+    Export:
+      Name: !Sub "${AWS::StackName}-DSQLIdentifier"
+  
+  DSQLClusterArn:
+    Condition: IsProduction
+    Description: "Aurora DSQL Cluster ARN"
+    Value: !GetAtt DSQLCluster.ResourceArn
+    Export:
+      Name: !Sub "${AWS::StackName}-DSQLArn"
+
+  Environment:
+    Description: "Deployment Environment"
+    Value: !Ref Environment
