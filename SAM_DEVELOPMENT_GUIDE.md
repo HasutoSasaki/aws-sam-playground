@@ -1,6 +1,6 @@
-# AWS SAM 開発ガイド
+# AWS SAM 開発ガイド - Todo API
 
-このドキュメントは AWS SAM (Serverless Application Model) を使用したサーバーレスアプリケーションの開発手順を説明します。
+このドキュメントは AWS SAM (Serverless Application Model) を使用したTodo管理APIの開発手順を説明します。
 
 ## 前提条件
 
@@ -15,51 +15,82 @@
 
 ```
 sam-playground/
-├── hello-world/          # Lambda 関数のソースコード (TypeScript)
-│   ├── app.ts           # メインの Lambda ハンドラー
-│   ├── package.json     # Node.js の依存関係
-│   └── tests/          # ユニットテスト
-├── events/              # テスト用のイベントファイル
-│   └── event.json      # API Gateway のテストイベント
-├── template.yaml        # SAM テンプレート（AWS リソース定義）
-└── samconfig.toml      # SAM の設定ファイル
+├── sam/                     # SAMプロジェクトディレクトリ
+│   ├── todo-api/
+│   │   ├── shared/          # 共通ライブラリ（Lambda Layer）
+│   │   │   ├── package.json # DSQL/PostgreSQL依存関係
+│   │   │   └── index.js     # データベース接続クライアント
+│   │   └── functions/       # Lambda関数群
+│   │       ├── get-todos/   # GET /todos
+│   │       ├── create-todo/ # POST /todos
+│   │       ├── update-todo/ # PUT /todos/{id}
+│   │       └── delete-todo/ # DELETE /todos/{id}
+│   ├── events/              # テスト用のイベントファイル
+│   ├── template.yml         # SAM テンプレート（環境切り替え対応）
+│   ├── docker-compose.yml   # ローカル開発用PostgreSQL
+│   ├── init-db.sql         # 初期データ投入
+│   └── samconfig.toml      # SAM の設定ファイル
+└── README_TODO_API.md      # Todo API使用手順
 ```
 
 ## 開発フロー
 
 ### 1. 初期セットアップ
 
-新しい環境で初回セットアップを行う場合：
+#### ローカル開発環境
 
 ```bash
-cd sam-playground
-sam build
-sam deploy --guided
+cd sam-playground/sam
+
+# PostgreSQL起動（ローカルDB）
+docker-compose up -d
+
+# 接続確認
+docker-compose exec postgres psql -U admin -d todoapp -c "SELECT * FROM todos;"
 ```
 
-`sam deploy --guided` では以下の項目を設定します：
-- **Stack Name**: CloudFormation スタック名
-- **AWS Region**: デプロイ先リージョン
-- **Confirm changes before deploy**: デプロイ前の変更確認
-- **Allow SAM CLI IAM role creation**: IAM ロール作成の許可
-- **Save arguments to samconfig.toml**: 設定の保存
+#### AWS環境初回セットアップ
+
+```bash
+cd sam-playground/sam
+
+# 開発環境デプロイ
+sam build --parameter-overrides Environment=dev
+sam deploy --parameter-overrides Environment=dev --guided
+
+# 本番環境デプロイ（Aurora DSQL作成）
+sam build --parameter-overrides Environment=prod  
+sam deploy --parameter-overrides Environment=prod --guided
+```
+
+**環境パラメータ**：
+- `Environment=local`: ローカル開発（PostgreSQL使用、Aurora DSQL作成なし）
+- `Environment=dev`: 開発環境（Aurora DSQL作成）
+- `Environment=prod`: 本番環境（Aurora DSQL作成）
 
 ### 2. ローカル開発
 
 #### ビルド
 
 ```bash
-sam build
+cd sam-playground/sam
+
+# ローカル環境用ビルド
+sam build --parameter-overrides Environment=local
 ```
 
-TypeScript のコンパイルと依存関係の解決を行います。
+共通ライブラリ（Layer）と各Lambda関数をビルドします。
 
 #### ローカルでの関数テスト
 
 単一の関数をテストイベントで実行：
 
 ```bash
-sam local invoke HelloWorldFunction --event events/event.json
+# Todo一覧取得テスト
+sam local invoke GetTodosFunction --parameter-overrides Environment=local
+
+# Todo作成テスト（イベントファイル使用）
+sam local invoke CreateTodoFunction --event events/create-todo.json --parameter-overrides Environment=local
 ```
 
 #### API Gateway の起動
@@ -67,13 +98,40 @@ sam local invoke HelloWorldFunction --event events/event.json
 ローカルでAPIサーバーを起動（ポート3000）：
 
 ```bash
-sam local start-api
+# 重要：PostgreSQLが起動していることを確認
+docker-compose ps
+
+# API起動
+sam local start-api --parameter-overrides Environment=local
 ```
 
-別ターミナルでテスト：
+#### 完全なTodo API検証
+
+別ターミナルでCRUD操作をテスト：
 
 ```bash
-curl http://localhost:3000/hello
+# 1. Todo一覧取得
+curl http://localhost:3000/todos
+
+# 2. Todo作成
+curl -X POST http://localhost:3000/todos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "SAMローカルテスト",
+    "description": "ローカル環境での検証",
+    "status": "pending"
+  }'
+
+# 3. ステータスフィルタ
+curl "http://localhost:3000/todos?status=pending&limit=10"
+
+# 4. Todo更新（IDは作成時のレスポンスから取得）
+curl -X PUT http://localhost:3000/todos/1 \
+  -H "Content-Type: application/json" \
+  -d '{"status": "completed"}'
+
+# 5. Todo削除
+curl -X DELETE http://localhost:3000/todos/1
 ```
 
 #### ログの監視
@@ -81,29 +139,75 @@ curl http://localhost:3000/hello
 デプロイ済みの関数のログをリアルタイムで監視：
 
 ```bash
-sam logs -n HelloWorldFunction --stack-name sam-playground --tail
+sam logs -n GetTodosFunction --stack-name <your-stack-name> --tail
+sam logs -n CreateTodoFunction --stack-name <your-stack-name> --tail
 ```
 
 ### 3. テスト
 
-#### ユニットテスト実行
+#### データベース接続テスト
 
 ```bash
-cd hello-world
-npm install
-npm run test
+# PostgreSQL接続確認
+docker-compose exec postgres psql -U admin -d todoapp -c "\dt"
+
+# 初期データ確認
+docker-compose exec postgres psql -U admin -d todoapp -c "SELECT * FROM todos;"
 ```
 
-#### 統合テスト
-
-API Gateway + Lambda の統合テスト：
+#### Lambda Layer ビルドテスト
 
 ```bash
-# ローカルAPIを起動
-sam local start-api
+# 共通ライブラリのビルド確認
+sam build --parameter-overrides Environment=local
 
-# 別ターミナルでテスト実行
-curl -i http://localhost:3000/hello
+# ビルド結果確認
+ls -la .aws-sam/build/DBClientLayer/
+```
+
+#### 統合テスト完全フロー
+
+```bash
+# 1. 環境準備
+docker-compose up -d
+sam build --parameter-overrides Environment=local
+
+# 2. API起動
+sam local start-api --parameter-overrides Environment=local
+
+# 3. 全APIエンドポイントテスト（別ターミナル）
+# GET /todos
+curl -v http://localhost:3000/todos
+
+# POST /todos 
+curl -v -X POST http://localhost:3000/todos \
+  -H "Content-Type: application/json" \
+  -d '{"title": "統合テスト", "status": "pending"}'
+
+# PUT /todos/{id}
+curl -v -X PUT http://localhost:3000/todos/1 \
+  -H "Content-Type: application/json" \
+  -d '{"status": "completed"}'
+
+# DELETE /todos/{id}
+curl -v -X DELETE http://localhost:3000/todos/1
+```
+
+#### エラーケーステスト
+
+```bash
+# 不正なJSONテスト
+curl -X POST http://localhost:3000/todos \
+  -H "Content-Type: application/json" \
+  -d '{"invalid": json}'
+
+# 存在しないIDテスト
+curl -X GET http://localhost:3000/todos/999
+
+# バリデーションエラーテスト
+curl -X POST http://localhost:3000/todos \
+  -H "Content-Type: application/json" \
+  -d '{"title": "", "status": "invalid"}'
 ```
 
 ### 4. デプロイ
